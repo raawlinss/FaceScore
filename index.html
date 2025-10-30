@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FaceScore</title>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet" />
+<style>
+ body { background: #0b0f14; color: #e6edf3; }
+ .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; }
+ .btn { background: #2563eb; color: white; border-radius: 10px; padding: 10px 16px; font-weight: 600; }
+ .btn:disabled { opacity: .6; }
+ .metric { background: #0f172a; border: 1px solid #1e293b; border-radius: 10px; padding: 10px; }
+ .score-badge { position: absolute; top: 12px; left: 12px; background: rgba(2,6,23,.72); border: 1px solid rgba(148,163,184,.35); backdrop-filter: blur(6px); padding: 8px 12px; border-radius: 10px; font-weight: 700; }
+ canvas { max-width: 100%; height: auto; }
+ .grid-col { display: grid; grid-template-columns: 1fr; gap: 16px; }
+ @media (min-width: 1024px) { .grid-col { grid-template-columns: 1fr 420px; } }
+</style>
+<script src="https://unpkg.com/@tensorflow/tfjs-core@4.19.0/dist/tf-core.min.js"></script>
+<script src="https://unpkg.com/@tensorflow/tfjs-converter@4.19.0/dist/tf-converter.min.js"></script>
+<script src="https://unpkg.com/@tensorflow/tfjs-backend-webgl@4.19.0/dist/tf-backend-webgl.min.js"></script>
+<script src="https://unpkg.com/@tensorflow-models/face-landmarks-detection@1.0.5/dist/face-landmarks-detection.min.js"></script>
+</head>
+<body>
+<div class="max-w-7xl mx-auto p-6">
+  <h1 class="text-2xl lg:text-3xl font-extrabold mb-6">FaceScore</h1>
+  <div class="grid-col gap-6">
+    <div class="card p-4 lg:p-6">
+      <div class="flex items-center gap-3 mb-4">
+        <input id="fileInput" type="file" accept="image/*" class="text-sm" />
+        <button id="analyzeBtn" class="btn" disabled>Analiz Et</button>
+        <span id="status" class="text-sm text-gray-300"></span>
+      </div>
+      <div class="relative w-full overflow-auto">
+        <div id="scoreBadge" class="score-badge hidden">Skor: <span id="scoreText">-</span></div>
+        <canvas id="canvas" class="w-full"></canvas>
+      </div>
+    </div>
+    <div class="card p-4 lg:p-6">
+      <h2 class="text-xl font-bold mb-3">Metri̇kler</h2>
+      <div class="space-y-3">
+        <div class="metric"><div class="text-sm text-gray-300">Orantı (Yükseklik/Genişlik)</div><div id="ratioMetric" class="text-lg font-semibold">-</div></div>
+        <div class="metric"><div class="text-sm text-gray-300">Göz Oranı (Göz arası / Yüz genişliği)</div><div id="eyeMetric" class="text-lg font-semibold">-</div></div>
+        <div class="metric"><div class="text-sm text-gray-300">Burun Oranı (Burun / Yüz yüksekliği)</div><div id="noseMetric" class="text-lg font-semibold">-</div></div>
+        <div class="metric"><div class="text-sm text-gray-300">Simetri</div><div id="symmetryMetric" class="text-lg font-semibold">-</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+let model;
+let imgBitmap;
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const fileInput = document.getElementById('fileInput');
+const analyzeBtn = document.getElementById('analyzeBtn');
+const statusEl = document.getElementById('status');
+const scoreBadge = document.getElementById('scoreBadge');
+const scoreText = document.getElementById('scoreText');
+const ratioMetric = document.getElementById('ratioMetric');
+const eyeMetric = document.getElementById('eyeMetric');
+const noseMetric = document.getElementById('noseMetric');
+const symmetryMetric = document.getElementById('symmetryMetric');
+
+function setStatus(t){ statusEl.textContent = t || ''; }
+function drawCircle(p, r, color){ ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI*2); ctx.fillStyle=color; ctx.fill(); }
+function drawLine(a,b,color,w){ ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.strokeStyle=color; ctx.lineWidth=w; ctx.stroke(); }
+function dist(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return Math.sqrt(dx*dx+dy*dy); }
+function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+function closenessScore(v, target, tol){ const d = Math.abs(v-target); const s = clamp(1 - d/tol, 0, 1); return s; }
+
+async function ensureModel(){
+  if (model) return;
+  setStatus('Model yükleniyor...');
+  await tf.setBackend('webgl');
+  model = await faceLandmarksDetection.load(faceLandmarksDetection.SupportedPackages.mediapipeFacemesh, { maxFaces: 1, shouldLoadIrisModel: true });
+  setStatus('');
+}
+
+fileInput.addEventListener('change', async (e)=>{
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const blobUrl = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    imgBitmap = img;
+    canvas.width = img.width; canvas.height = img.height;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.drawImage(img,0,0,canvas.width,canvas.height);
+    scoreBadge.classList.add('hidden');
+    scoreText.textContent='-';
+    analyzeBtn.disabled = false;
+  };
+  img.src = blobUrl;
+});
+
+analyzeBtn.addEventListener('click', async ()=>{
+  if (!imgBitmap) return;
+  analyzeBtn.disabled = true;
+  await ensureModel();
+  setStatus('Analiz ediliyor...');
+  const predictions = await model.estimateFaces({ input: imgBitmap, flipHorizontal: false, predictIrises: true });
+  ctx.drawImage(imgBitmap,0,0,canvas.width,canvas.height);
+  if (!predictions || predictions.length===0){
+    setStatus('Yüz bulunamadı.');
+    analyzeBtn.disabled = false;
+    return;
+  }
+  const p = predictions[0];
+  const kpts = p.scaledMesh.map(([x,y])=>({x,y}));
+  const ann = p.annotations || {};
+
+  ctx.save();
+  for (let i=0;i<kpts.length;i+=5){ drawCircle(kpts[i], 1.6, 'rgba(59,130,246,0.9)'); }
+  if (p.boundingBox && p.boundingBox.topLeft && p.boundingBox.bottomRight){
+    const tl = {x:p.boundingBox.topLeft[0][0], y:p.boundingBox.topLeft[0][1]};
+    const br = {x:p.boundingBox.bottomRight[0][0], y:p.boundingBox.bottomRight[0][1]};
+    ctx.strokeStyle='rgba(34,197,94,0.9)'; ctx.lineWidth=2; ctx.strokeRect(tl.x, tl.y, br.x-tl.x, br.y-tl.y);
+  }
+  ctx.restore();
+
+  function pick(anns, key, idx=0){ return anns[key] && anns[key][idx] ? {x:anns[key][idx][0], y:anns[key][idx][1]} : null; }
+  const leftOuter = pick(ann,'leftEyeOuterCorner') || pick(ann,'leftEyeLower0',0) || pick(ann,'leftEyeUpper0',0);
+  const rightOuter = pick(ann,'rightEyeOuterCorner') || pick(ann,'rightEyeLower0',0) || pick(ann,'rightEyeUpper0',0);
+  const leftCheek = pick(ann,'leftCheek') || pick(ann,'silhouette',234);
+  const rightCheek = pick(ann,'rightCheek') || pick(ann,'silhouette',454);
+  const chin = pick(ann,'lipsLowerInner',5) || pick(ann,'silhouette',152);
+  const topFace = pick(ann,'foreheadGlabella') || pick(ann,'silhouette',10);
+  const noseTip = pick(ann,'noseTip') || pick(ann,'midwayBetweenEyes') || pick(ann,'noseBottom',0);
+  const midEyes = pick(ann,'midwayBetweenEyes') || (leftOuter&&rightOuter? {x:(leftOuter.x+rightOuter.x)/2, y:(leftOuter.y+rightOuter.y)/2}:null);
+
+  let faceWidth = null, faceHeight = null, eyeDist = null, noseLen = null;
+  if (leftCheek && rightCheek) faceWidth = dist(leftCheek,rightCheek);
+  if (topFace && chin) faceHeight = dist(topFace,chin);
+  if (leftOuter && rightOuter) eyeDist = dist(leftOuter,rightOuter);
+  if (noseTip && midEyes) noseLen = dist(noseTip, midEyes);
+
+  if (leftOuter && rightOuter){ drawLine(leftOuter,rightOuter,'rgba(250,204,21,0.9)',2); }
+  if (leftCheek && rightCheek){ drawLine(leftCheek,rightCheek,'rgba(34,197,94,0.9)',2); }
+  if (topFace && chin){ drawLine(topFace,chin,'rgba(244,63,94,0.9)',2); }
+  if (noseTip && midEyes){ drawLine(noseTip, midEyes,'rgba(96,165,250,0.9)',2); }
+
+  let ratioScore=0, eyeScore=0, noseScore=0, symmetryScore=0;
+  let ratioVal='-'; let eyeVal='-'; let noseVal='-'; let symVal='-';
+
+  if (faceWidth && faceHeight){
+    const v = faceHeight/faceWidth;
+    ratioVal = v.toFixed(3);
+    ratioScore = closenessScore(v, 1.618, 0.5);
+  }
+  if (eyeDist && faceWidth){
+    const v = eyeDist/faceWidth;
+    eyeVal = v.toFixed(3);
+    eyeScore = closenessScore(v, 0.46, 0.2);
+  }
+  if (noseLen && faceHeight){
+    const v = noseLen/faceHeight;
+    noseVal = v.toFixed(3);
+    noseScore = closenessScore(v, 0.33, 0.15);
+  }
+  if (kpts && kpts.length){
+    const xs = kpts.map(p=>p.x).sort((a,b)=>a-b);
+    const midx = xs[Math.floor(xs.length/2)];
+    let total=0, n=0;
+    for (let i=0;i<kpts.length;i+=20){
+      const q = kpts[i];
+      const rx = 2*midx - q.x;
+      let best=null, bd=1e9;
+      for (let j=0;j<kpts.length;j+=20){ const r=kpts[j]; const d=(r.x-rx)*(r.x-rx)+(r.y-q.y)*(r.y-q.y); if(d<bd){bd=d; best=r;} }
+      if (best){ total += Math.sqrt(bd); n++; }
+    }
+    const norm = Math.sqrt(faceWidth?faceWidth:canvas.width)+1e-6;
+    const avg = n? (total/n)/norm : 1;
+    symmetryScore = clamp(1 - avg, 0, 1);
+    symVal = (symmetryScore*100).toFixed(1)+'%';
+  }
+
+  const weights = { ratio:.3, eye:.25, nose:.2, sym:.25 };
+  const finalScore = 100* ( (ratioScore||0)*weights.ratio + (eyeScore||0)*weights.eye + (noseScore||0)*weights.nose + (symmetryScore||0)*weights.sym );
+
+  ratioMetric.textContent = ratioVal === '-' ? '-' : ratioVal + ' (hedef 1.618)';
+  eyeMetric.textContent = eyeVal === '-' ? '-' : eyeVal + ' (hedef ~0.46)';
+  noseMetric.textContent = noseVal === '-' ? '-' : noseVal + ' (hedef ~0.33)';
+  symmetryMetric.textContent = symVal;
+
+  scoreBadge.classList.remove('hidden');
+  scoreText.textContent = Math.round(finalScore);
+
+  ctx.save();
+  ctx.fillStyle='rgba(2,6,23,.75)';
+  ctx.fillRect(10,10,160,44);
+  ctx.strokeStyle='rgba(148,163,184,.35)';
+  ctx.lineWidth=1; ctx.strokeRect(10.5,10.5,159,43);
+  ctx.fillStyle='#e6edf3';
+  ctx.font='700 26px ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto';
+  ctx.fillText('Skor: '+Math.round(finalScore), 22, 40);
+  ctx.restore();
+
+  setStatus('Hazır');
+  analyzeBtn.disabled = false;
+});
+
+ensureModel().catch(()=>{});
+</script>
+</body>
+</html>
