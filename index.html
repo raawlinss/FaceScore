@@ -7,10 +7,10 @@
 <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet" />
 <style>
  body { background: #0b0f14; color: #e6edf3; }
- .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; }
- .btn { background: #2563eb; color: white; border-radius: 10px; padding: 10px 16px; font-weight: 600; }
- .btn:disabled { opacity: .6; }
- .metric { background: #0f172a; border: 1px solid #1e293b; border-radius: 10px; padding: 10px; }
+  .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; }
+  .btn { background: #2563eb; color: white; border-radius: 10px; padding: 10px 16px; font-weight: 600; }
+  .btn:disabled { opacity: .6; }
+  .metric { background: #0f172a; border: 1px solid #1e293b; border-radius: 10px; padding: 10px; }
  .score-badge { position: absolute; top: 12px; left: 12px; background: rgba(2,6,23,.72); border: 1px solid rgba(148,163,184,.35); backdrop-filter: blur(6px); padding: 8px 12px; border-radius: 10px; font-weight: 700; }
  canvas { max-width: 100%; height: auto; }
  .grid-col { display: grid; grid-template-columns: 1fr; gap: 16px; }
@@ -441,16 +441,6 @@ function resetUIForImage(img){
     canvas.width = w; canvas.height = h;
     ctx.clearRect(0,0,canvas.width,canvas.height);
     ctx.drawImage(img,0,0,canvas.width,canvas.height);
-    // Apply OpenCV-based preprocessing (denoise, unsharp, CLAHE)
-    if (cvReady) {
-      const mat = cv.imread(canvas);
-      cv.cvtColor(mat, mat, cv.COLOR_RGBA2GRAY);
-      cv.GaussianBlur(mat, mat, new cv.Size(3, 3), 0);
-      cv.convertScaleAbs(mat, mat, 1.5, 0);
-      cv.applyCLAHE(mat, mat, 2.0, new cv.Size(8, 8));
-      cv.imshow(canvas, mat);
-      mat.delete();
-    }
   }
   scoreBadge.classList.add('hidden');
   scoreText.textContent='-';
@@ -685,7 +675,11 @@ function drawAll(preds, metricsList, baseInput){
   ctx.save();
   if (mirrored){ ctx.translate(canvas.width, 0); ctx.scale(-1, 1); }
   ctx.drawImage(input,0,0,canvas.width,canvas.height);
-  preds.forEach((p,i)=> drawPrediction(input, p, metricsList[i], i, i===selectedFace));
+  preds.forEach((p,i)=>{
+    const m = metricsList[i];
+    if (m && m.kind === 'blaze') { drawPredictionBlaze(input, p, m, i, i===selectedFace); }
+    else { drawPrediction(input, p, m, i, i===selectedFace); }
+  });
   ctx.restore();
   // corner score
   const s = Math.round(metricsList[selectedFace]?.finalScore || metricsList[selectedFace]?.baseScore || 0);
@@ -749,9 +743,9 @@ async function analyzeOnce(input){
     facesContainer.innerHTML = '';
     return [];
   }
-  const metricsList = (predictions && predictions.length>0)
-    ? predictions.map(p=>computeMetrics(p))
-    : blazePreds.map(p=>computeMetricsFromBlaze(p));
+  const usingMesh = (predictions && predictions.length>0);
+  const metricsList = usingMesh ? predictions.map(p=>computeMetrics(p)) : blazePreds.map(p=>computeMetricsFromBlaze(p));
+  lastPredictions = usingMesh ? predictions : blazePreds;
   // quality: blur (global) and tilt (per face)
   try{ await tryInitOpenCV(); }catch(e){}
   if (cvReady){
@@ -828,7 +822,7 @@ async function loopLive(ts){
   try{ await analyzeOnce(video); } catch(e){ /* ignore frame errors */ }
 }
 
-ensureModel().catch(()=>{});
+ensureModels().catch(()=>{});
 loadProfiles();
 
 // Keyboard shortcuts
